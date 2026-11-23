@@ -1,0 +1,24 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+Ceph RGW multisite, deployed by Fleet from k8s-cookbook, copies object data from any source cluster into chango automatically.
+
+\subsection{Applications}
+
+\begin{itemize}
+  \item \textbf{Off-site copy:} data written at a remote site gets a second copy in La Serena.
+  \item \textbf{Central storage:} several sources can feed one central store on chango.
+  \item \textbf{Local reads:} users near chango read the same buckets with the same keys.
+  \item \textbf{Disaster recovery:} if a source is lost, chango can be promoted to master.
+\end{itemize}
+
+\subsection{Warnings on size}
+
+\begin{itemize}
+  \item \textbf{Full copy everywhere:} every zone holds all the data, so the smallest zone limits the realm.
+  \item \textbf{Deletes replicate:} deleting on the source deletes on chango, so this is a mirror, not a backup.
+  \item \textbf{Quotas stop writes:} a full source rejects writes, and a full chango stalls sync.
+  \item \textbf{Raw capacity:} chango's 3x replication means 900Ti of data uses about 2.7PB of disk.
+  \item \textbf{Bucket limits:} set \texttt{bucketMaxSize} on every ObjectBucketClaim so no bucket fills the pool.
+  \item \textbf{Sync lag:} large objects and outage backlogs take time, so check \texttt{sync status} before relying on chango.
+\end{itemize}

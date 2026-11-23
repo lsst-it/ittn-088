@@ -5,3 +5,5 @@
 #
 # Example:
 #   MIA:Missing In Action
+RGW:RADOS Gateway
+S3:Simple Storage System

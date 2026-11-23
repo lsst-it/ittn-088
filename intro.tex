@@ -1,0 +1,9 @@
+\section{Introduction}
+
+Rook-Ceph contains many powerful tools baked into it's software. One of which is replication.
+
+This Technote strives to illustrate how Rubin Observatory will use replication with our clusters.
+
+The \texttt{chango} cluster (La Serena) hosts the \texttt{elkan} Ceph RGW (S3-compatible) object store, deployed with Rook and managed by Fleet from the \href{https://github.com/lsst-it/k8s-cookbook}{k8s-cookbook} repository. Chango is the long-term storage location for this data.
+
+Data is not written to chango directly. It is written at a source location, which can be another cluster or storage system, and replicated to chango with Ceph RGW multisite:
