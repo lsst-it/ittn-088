@@ -1,0 +1,353 @@
+\section{Getting it to work}
+
+\label{sec:newsource}
+
+This section describes how to configure your own cluster as a source that replicates into chango. Kueyen, the proof-of-concept source, is used as the worked example. Replace \texttt{<site>} with your cluster name and \texttt{<s3-endpoint>} with the hostname of your S3 endpoint.
+
+\subsection{Prerequisites}
+
+\begin{itemize}
+  \item A Kubernetes cluster running Rook-Ceph, with the \texttt{rook-ceph} namespace and a healthy CephCluster.
+  \item An nginx ingress controller and cert-manager with a \texttt{letsencrypt} ClusterIssuer, or another way to serve HTTPS.
+  \item A DNS record for \texttt{<s3-endpoint>} (kueyen uses \texttt{s3.elkan.kueyen.dev.lsst.org}).
+  \item HTTPS connectivity in both directions between your endpoint and \url{https://s3.chango.ls.lsst.org}.
+  \item Access to the \texttt{rgw-realm-elkan} item in 1Password.
+\end{itemize}
+
+\subsection{Step 1: Realm credentials}
+
+Every zone in the realm must use the same system keys. If your cluster runs External Secrets with a \texttt{onepassword} ClusterSecretStore, this is how kueyen does it:
+
+{\small
+\begin{verbatim}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: elkan-keys
+  namespace: rook-ceph
+spec:
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: onepassword
+  target:
+    name: elkan-keys
+  data:
+    - secretKey: access-key
+      remoteRef:
+        key: rgw-realm-elkan
+        property: access-key
+    - secretKey: secret-key
+      remoteRef:
+        key: rgw-realm-elkan
+        property: secret-key
+\end{verbatim}
+}
+
+\subsection{Step 2: Realm, zonegroup and zone}
+
+{\small
+\begin{verbatim}
+---
+apiVersion: ceph.rook.io/v1
+kind: CephObjectRealm
+metadata:
+  name: elkan
+  namespace: rook-ceph
+spec:
+  defaultRealm: false
+---
+apiVersion: ceph.rook.io/v1
+kind: CephObjectZoneGroup
+metadata:
+  name: elkan
+  namespace: rook-ceph
+spec:
+  realm: elkan
+---
+apiVersion: ceph.rook.io/v1
+kind: CephObjectZone
+metadata:
+  name: elkan-<site>                # kueyen: elkan-kueyen
+  namespace: rook-ceph
+spec:
+  zoneGroup: elkan
+  customEndpoints:
+    - https://<s3-endpoint>         # kueyen: s3.elkan.kueyen.dev.lsst.org
+  metadataPool:
+    failureDomain: host
+    replicated:
+      size: 3
+    quotas:
+      maxSize: 10Gi
+  dataPool:
+    failureDomain: host
+    erasureCoded:
+      dataChunks: 2
+      codingChunks: 1
+    quotas:
+      maxSize: 1Ti
+  preservePoolsOnDelete: true
+\end{verbatim}
+}
+
+\subsection{Step 3: Object store}
+
+{\small
+\begin{verbatim}
+---
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStore
+metadata:
+  name: elkan
+  namespace: rook-ceph
+spec:
+  preservePoolsOnDelete: true
+  gateway:
+    port: 80
+    instances: 2
+    resources:
+      limits:
+        cpu: "4"
+        memory: 4Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+  zone:
+    name: elkan-<site>
+\end{verbatim}
+}
+
+\subsection{Step 4: Ingress}
+
+Keep the timeout and buffering annotations. Without them, large objects and long sync requests fail.
+
+{\small
+\begin{verbatim}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rook-ceph-rgw-elkan
+  namespace: rook-ceph
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/proxy-body-size: 1024m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - &host <s3-endpoint>
+      secretName: rook-ceph-rgw-elkan-ingress-tls
+  rules:
+    - host: *host
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rook-ceph-rgw-elkan
+                port:
+                  number: 80
+\end{verbatim}
+}
+
+\subsection{Step 5: StorageClass}
+
+Buckets are provisioned on the source, never on chango but will appear on Chango due to the replication.
+
+{\small
+\begin{verbatim}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: elkan
+provisioner: rook-ceph.ceph.rook.io/bucket
+parameters:
+  objectStoreName: elkan
+  objectStoreNamespace: rook-ceph
+reclaimPolicy: Retain
+\end{verbatim}
+}
+
+\subsection{Step 6: Promote the zone to master}
+
+The master role is not set by hand. It is set by adding two \texttt{radosgw-admin} commands to the cluster's \texttt{cephcli} ConfigMap in k8s-cookbook. Fleet deploys the ConfigMap with the rest of the \texttt{rook-ceph-conf} chart, and its script runs against the cluster, so the setting is version-controlled and reapplied automatically.
+
+For kueyen, these lines were added to the end of the script in:
+\path{fleet/lib/rook-ceph-conf/charts/kueyen/templates/cm-cephcli.yaml}:
+
+{\small
+\begin{verbatim}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cephcli
+  namespace: rook-ceph
+data:
+  script: |
+    # ... existing cluster setup commands ...
+
+    ceph osd pool set .mgr nodelete true
+    ceph osd pool set .mgr nosizechange true
+
+    # elkan multisite: kueyen is the master zone
+    radosgw-admin zone modify --rgw-realm=elkan --rgw-zone=elkan-kueyen \
+      --master --read-only=false --sync-from-all=false >/dev/null
+    radosgw-admin period update --commit --rgw-realm=elkan >/dev/null
+\end{verbatim}
+}
+
+The first command makes \texttt{elkan-kueyen} the writable master zone of the realm. The second commits a new period so the change reaches every zone, including chango. For a new source, add the same two lines to that cluster's \texttt{cm-cephcli.yaml}, with \texttt{elkan-<site>} as the zone name.
+
+Chango's \texttt{cm-cephcli.yaml} holds the matching replica side:
+
+{\small
+\begin{verbatim}
+    radosgw-admin zone modify --rgw-realm=elkan --rgw-zone=elkan \
+      --read-only --sync-from-all=true >/dev/null
+    radosgw-admin period update --commit --rgw-realm=elkan >/dev/null
+\end{verbatim}
+}
+
+\subsection{Step 7: Point chango at your endpoint}
+
+Open a pull request against k8s-cookbook the realm pull endpoint in
+\texttt{fleet/lib/rook-ceph-conf/charts/chango/templates/cephobjectstore-elkan.yaml}:
+
+{\small
+\begin{verbatim}
+apiVersion: ceph.rook.io/v1
+kind: CephObjectRealm
+metadata:
+  name: elkan
+  namespace: rook-ceph
+spec:
+  defaultRealm: true
+  pull:
+    endpoint: https://<s3-endpoint>
+\end{verbatim}
+}
+
+\textbf{Note:} a zonegroup has exactly one master zone. If a master already exists (currently kueyen), a new source should not promote itself in Step 6. It should instead pull the realm from the existing master, by adding \texttt{pull.endpoint} to its own \texttt{CephObjectRealm}, and join as an additional writable zone. Chango already has \texttt{--sync-from-all=true}, so it replicates from every zone in the zonegroup. Coordinate with the team before adding a second source.
+
+\subsection{Step 8: Test replication}
+
+This demo writes to a dedicated \texttt{ittn-088} bucket on kueyen and shows it replicate to read-only chango.
+
+\subsubsection{Create the demo bucket}
+
+The bucket is a fixed-name owner plus an ObjectBucketClaim, both in \texttt{fleet/lib/rook-ceph-conf/charts/kueyen/templates/}.
+
+{\small
+\begin{verbatim}
+# cephobjectstoreuser-ittn-088.yaml
+---
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStoreUser
+metadata:
+  name: ittn-088
+  namespace: rook-ceph
+spec:
+  store: elkan
+  clusterNamespace: rook-ceph
+  quotas:
+    maxBuckets: 1
+\end{verbatim}
+}
+
+{\small
+\begin{verbatim}
+# obc-ittn-088.yaml
+---
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: &name ittn-088
+  namespace: rook-ceph
+spec:
+  bucketName: *name
+  storageClassName: elkan
+  additionalConfig:
+    bucketOwner: ittn-088
+    bucketMaxSize: 1Gi
+\end{verbatim}
+}
+
+\subsubsection{Set up aliases and credentials}
+
+The aliases reach each cluster's toolbox and S3 endpoint, and the bucket owner's keys work on both because user metadata replicates.
+
+{\small
+\begin{verbatim}
+alias T='kubectl --context kueyen -n rook-ceph exec deploy/rook-ceph-tools --'
+alias C='kubectl --context chango -n rook-ceph exec deploy/rook-ceph-tools --'
+
+S=rook-ceph-object-user-elkan-ittn-088
+aws configure set aws_access_key_id "$(kubectl --context kueyen \
+  -n rook-ceph get secret $S -o jsonpath='{.data.AccessKey}' \
+  | base64 -d)" --profile ittn-088
+aws configure set aws_secret_access_key "$(kubectl --context kueyen \
+  -n rook-ceph get secret $S -o jsonpath='{.data.SecretKey}' \
+  | base64 -d)" --profile ittn-088
+aws configure set region elkan --profile ittn-088
+aws configure set s3.addressing_style path --profile ittn-088
+
+alias s3k='aws --profile ittn-088 \
+  --endpoint-url https://s3.elkan.kueyen.dev.lsst.org'
+alias s3c='aws --profile ittn-088 \
+  --endpoint-url https://s3.chango.ls.lsst.org'
+\end{verbatim}
+}
+
+\subsubsection{Check that the bucket exists on both clusters}
+
+The bucket shows up on chango without being created there, because bucket metadata replicates.
+
+{\small
+\begin{verbatim}
+kubectl --context kueyen -n rook-ceph get obc ittn-088 \
+  -o jsonpath='{.status.phase}{"\n"}'                    # Bound
+T radosgw-admin bucket list --rgw-realm=elkan | grep ittn-088
+C radosgw-admin bucket list --rgw-realm=elkan | grep ittn-088
+\end{verbatim}
+}
+
+\subsubsection{Demonstrate replication}
+
+The file written on kueyen should be readable on chango, and the write to chango should fail with \texttt{AccessDenied}.
+
+{\small
+\begin{verbatim}
+# 1. Write on kueyen (source)
+echo "ITTN-088 replication demo $(date)" > ittn-088-demo.txt
+s3k s3 cp ittn-088-demo.txt s3://ittn-088/
+
+# 2. Read it on chango a few seconds later
+s3c s3 ls s3://ittn-088/
+s3c s3 cp s3://ittn-088/ittn-088-demo.txt -
+
+# 3. Chango refuses writes (AccessDenied)
+echo nope | s3c s3 cp - s3://ittn-088/nope.txt
+\end{verbatim}
+}
+
+\subsubsection{Check from the admin side}
+
+Chango should list \texttt{ittn-088-demo.txt} and report \texttt{data is caught up with source}, and the last command lists sync errors if it doesn't.
+
+{\small
+\begin{verbatim}
+C radosgw-admin bucket list --rgw-realm=elkan --bucket=ittn-088 \
+  | jq -r '.[] | "\(.meta.size)\t\(.name)"'
+T radosgw-admin bucket sync status --rgw-realm=elkan --bucket=ittn-088
+C radosgw-admin sync status --rgw-realm=elkan
+C radosgw-admin sync error list --rgw-realm=elkan | head -30
+\end{verbatim}
+}

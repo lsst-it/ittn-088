@@ -22,7 +22,9 @@
 % Optional subtitle
 % \setDocSubtitle{A subtitle}
 
-\input{authors}
+\author{%
+Baden Erb
+}
 
 \setDocRef{ITTN-088}
 \setDocUpstreamLocation{\url{https://github.com/lsst-it/ittn-088}}
@@ -33,7 +35,7 @@
 % \setDocCurator{The Curator of this Document}
 
 \setDocAbstract{%
-Description of Ceph Replication for backups
+ This ITTN documents how data is replicated into the \texttt{chango} object store (\texttt{elkan}) using Ceph RGW multisite. Chango is the long-term storage location and acts as a read-only replica, while data is written at one or more source clusters or storage locations. The \texttt{kueyen} cluster is used throughout as a proof-of-concept source.
 }
 
 % Change history defined here.
@@ -41,7 +43,7 @@ Description of Ceph Replication for backups
 % Fields: VERSION, DATE, DESCRIPTION, OWNER NAME.
 % See LPM-51 for version number policy.
 \setDocChangeRecord{%
-  \addtohist{1}{YYYY-MM-DD}{Unreleased.}{Erb}
+  \addtohist{1}{2026-11-23}{Unreleased.}{Erb}
 }
 
 
@@ -54,6 +56,13 @@ Description of Ceph Replication for backups
 
 % ADD CONTENT HERE
 % You can also use the \input command to include several content files.
+\include{intro}
+
+\include{figure}
+
+\include{working}
+
+\include{conclusion}
 
 \appendix
 
